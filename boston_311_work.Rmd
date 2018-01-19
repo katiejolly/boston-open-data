@@ -1,0 +1,348 @@
+---
+title: "311 calls (Boston application)"
+author: "Katie Jolly"
+date: "January 12, 2018"
+output: html_document
+---
+
+```{r}
+# packages
+
+library(tidyverse)
+library(lubridate)
+library(treemap)
+library(highcharter)
+library(viridisLite)
+library(tidycensus)
+library(leaflet)
+library(tigris)
+library(highcharter)
+library(viridis)
+library(sp)
+library(raster)
+library(rgdal)
+library(rgeos)
+library(maptools)
+library(broom)
+
+# data
+
+boston_311 <- read_csv("311_cases_exercise.csv")
+```
+
+### Which request type is most likely to be called in by constituents?
+
+```{r}
+types <- boston_311 %>% group_by(TYPE) %>% summarize(total = n()) %>% arrange(desc(total))
+
+head(types, 1)
+```
+
+### How many request for pothole repairs were made in July 2017? 
+
+```{r}
+potholes_jul17 <- boston_311 %>%
+  mutate(open_month = month(open_dt),
+         open_year = year(open_dt)) %>%
+  filter(open_month == 7, open_year == 2017) %>% 
+  group_by(TYPE) %>%
+  summarize(total = n()) %>%
+  filter(TYPE == "Request for Pothole Repair")
+
+potholes_jul17
+```
+
+### What percentage of graffiti removal cases are open and overdue citywide?
+
+```{r}
+graffiti <- boston_311 %>%
+  filter(TYPE == "Graffiti Removal") %>%
+  group_by(OnTime_Status, CASE_STATUS) %>%
+  summarize(n = n()) %>%
+  mutate(freq = n / 2077)
+
+sum(graffiti$freq)
+
+head(graffiti)
+```
+
+```{r}
+photos_hyde_park <- boston_311 %>%
+  filter(neighborhood == "Hyde Park") %>%
+  mutate(has_photo = ifelse(SubmittedPhoto == "NULL", FALSE, TRUE)) %>%
+  group_by(TYPE, has_photo) %>% 
+  summarize(n = n())
+
+photos_percent <- boston_311 %>%
+  filter(neighborhood == "Hyde Park") %>%
+  mutate(has_photo = ifelse(SubmittedPhoto == "NULL", FALSE, TRUE)) %>%
+  group_by(TYPE) %>%
+  summarize(total = n(), 
+            percent_photo = sum(has_photo == TRUE)/ (sum(has_photo == TRUE) + sum(has_photo == FALSE))) %>%
+  arrange(desc(percent_photo))
+
+photos_percent
+```
+
+* What general trends do you see in constituent engagement? What services are people requesting? What do you see at a neighborhood level?   
+
+* City Operations: How long does it take to complete a request? What do you see at the departmental-level? What are areas that the City should focus on and what areas has the City done well in? 
+
+```{r}
+requests_status <- boston_311 %>%
+  group_by(TYPE, OnTime_Status, CASE_STATUS) %>%
+  summarize(total = n()) %>%
+  mutate(type = paste(OnTime_Status, CASE_STATUS, " "))
+```
+
+
+* Given more time, what would you like to do with this dataset? Is there further analysis you would like to do? How would you work with departments to improve City services? Are there problems you see in the dataset that would pose challenges to future analyses? 
+
+* How can the City use the information in this dataset—both within City Hall and with the public—to better connect with communities?  
+
+
+### Ideas
+
+* Look at correlation of certain requests and income levels 
+
+```{r}
+bos_inc <- get_acs(geography = "tract", 
+              variables = c(medincome = "B19013_001"), 
+              state = "MA",
+              county = "Suffolk")
+
+bos_inc
+# library(tigris)
+# 
+# options(tigris_use_cache = FALSE)
+# 
+# bos_tract <- tracts(state = "MA", county = "Suffolk")
+
+bos_joined <- geo_join(bos_tract, bos_inc, by = "GEOID") 
+
+bos_joined <- subset(bos_joined, NAME.1 != "Census Tract 9901.01, Suffolk County, Massachusetts")
+
+```
+
+```{r}
+street_lights <- boston_311 %>%
+  filter(TYPE == "Street Light Outages")
+
+neighborhood_lights <- street_lights %>%
+  group_by(neighborhood) %>%
+  summarize(total = n(),
+            open_ontime = sum(OnTime_Status == "ONTIME" & CASE_STATUS == "Open"),
+            open_overdue = sum(OnTime_Status == "OVERDUE" & CASE_STATUS == "Open"),
+            closed_overdue = sum(OnTime_Status == "OVERDUE" & CASE_STATUS == "Closed"),
+            closed_ontime = sum(OnTime_Status == "ONTIME" & CASE_STATUS == "Closed"),
+            overdue = sum(OnTime_Status == "OVERDUE"),
+            ontime = sum(OnTime_Status == "ONTIME")) %>%
+  mutate(overdue_pct = overdue / (overdue + ontime),
+         ontime_pct = 1 - overdue_pct)
+```
+
+```{r}
+heat_311 <- boston_311 %>%
+  filter(TYPE == "Heat - Excessive  Insufficient")
+
+pal <- colorBin("PuBu", domain = bos_inc$estimate, bins = 5)
+
+leaflet(bos_joined) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~pal(estimate),
+    weight = 2,
+  opacity = 1,
+  color = "gray",
+  dashArray = "1",
+  fillOpacity = 0.9,
+  highlight = highlightOptions(
+      weight = 5,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.7,
+      bringToFront = TRUE),
+  label = bos_joined$NAME.1
+  ) %>%
+  addMarkers(
+    data = heat_311,
+  clusterOptions = markerClusterOptions()
+)
+
+# filter out the water tract geoid = 25025990101
+
+v16 <- load_variables(2016, "acs5", cache = TRUE)
+```
+
+```{r}
+heat_neighborhoods <- heat_311 %>%
+  group_by(neighborhood) %>%
+  summarize(total = n())
+
+boston_311$Source <- as.factor(boston_311$Source)
+levels(boston_311$Source)
+
+call_types <- boston_311 %>%
+  group_by(TYPE) %>%
+  summarize(total = n(),
+            constituent_call = sum(Source == "Constituent Call"),
+            citizens_app = sum(Source == "Citizens Connect App"),
+            worker_app = sum(Source == "City Worker App"),
+            employee_gen = sum(Source == "Employee Generated"),
+            twitter = sum(Source == "Twitter"),
+            maximo = sum(Source == "Maximo Integration"),
+            self_service = sum(Source == "Self Service"))
+
+
+
+call_neighor_types <- boston_311 %>%
+  group_by(neighborhood) %>%
+  summarize(total = n(),
+            constituent_call = sum(Source == "Constituent Call"),
+            citizens_app = sum(Source == "Citizens Connect App"),
+            worker_app = sum(Source == "City Worker App"),
+            employee_gen = sum(Source == "Employee Generated"),
+            twitter = sum(Source == "Twitter"),
+            maximo = sum(Source == "Maximo Integration"),
+            self_service = sum(Source == "Self Service"))
+
+calls_narrow <- call_neighor_types %>%
+  gather("key", "value", 3:9)
+
+```
+
+
+```{r}
+neighborhoods_shp <- readShapePoly("neighborhoods/Boston_Neighborhoods.shp")
+```
+
+```{r}
+heat_311 <- heat_311 %>%
+  mutate(month = month(open_dt),
+         year = year(open_dt),
+         day = day(open_dt),
+         mdy = mdy(paste(month, day, year, sep = " ")))
+
+heat_311_neighborhood_date <- heat_311 %>%
+  group_by(neighborhood, mdy) %>%
+  summarize(total = n())
+
+fntltp <- JS("function(){
+  return this.point.mdy + ', ' +  this.series.yAxis.categories[this.point.y] + ':<br>' +
+  Highcharts.numberFormat(this.point.value, 0) + ' report(s)';
+}")
+
+
+hchart(heat_311_neighborhood_date, "heatmap", hcaes(x = mdy, y = neighborhood, value = total)) %>% 
+  hc_colorAxis(stops = color_stops(10, rev(inferno(10))),
+               type = "logarithmic") %>% 
+  hc_yAxis(reversed = TRUE, offset = -20, tickLength = 0,
+           gridLineWidth = 0, minorGridLineWidth = 0,
+           labels = list(style = list(fontSize = "8px"))) %>% 
+  hc_tooltip(formatter = fntltp) %>% 
+  hc_title(text = "It's getting hot in here: 311 reports for excessive/insufficient heat") %>% 
+  hc_legend(layout = "vertical", verticalAlign = "top",
+            align = "right", valueDecimals = 0) %>% 
+  hc_size(height = 800)
+```
+
+```{r}
+# aggregating points to census tract
+
+xy <- heat_311[,c(27, 28)]
+
+spdf <- SpatialPointsDataFrame(coords = xy, data = heat_311)
+
+# figure out how to change the projection
+
+```
+
+```{r}
+# addresses with a lot of requests
+common_heat_addy <- heat_311 %>% 
+  group_by(LOCATION_STREET_NAME) %>% 
+  summarize(total = n(),
+            latitude = mean(Latitude),
+            longitude = mean(Longitude)) %>% 
+  arrange(desc(total)) %>%
+  filter(total >= 3)
+
+pal <- colorBin("PuBu", domain = bos_inc$estimate, bins = 5)
+
+
+
+icons <- awesomeIcons(
+  icon = 'ion-fireball',
+  iconColor = 'black',
+  library = 'ion',
+  markerColor = ~ifelse(total <=4, "orange", "red")
+)
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g insufficient/excessive heat reports",
+  common_heat_addy$LOCATION_STREET_NAME, common_heat_addy$total
+) %>% lapply(htmltools::HTML)
+
+leaflet(bos_joined) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~pal(estimate),
+    weight = 2,
+  opacity = 1,
+  color = "gray",
+  dashArray = "1",
+  fillOpacity = 0.6,
+  highlight = highlightOptions(
+      weight = 5,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.7,
+      bringToFront = TRUE),
+  label = bos_joined$NAME.1
+  ) %>%
+  addAwesomeMarkers(~longitude, ~latitude, icon=icons, label=labels,
+    data = common_heat_addy,
+  clusterOptions = markerClusterOptions()
+)
+```
+
+
+```{r}
+# reverse geocoding: lat long to census tract
+heat <- SpatialPointsDataFrame(coords=heat_311[, c("Longitude", "Latitude")],
+           data=heat_311[, c("neighborhood", "open_dt", "OnTime_Status", "CASE_STATUS")],
+           proj4string=CRS("+proj=longlat +datum=WGS84"))
+
+heat <- spTransform(heat, "+proj=longlat +datum=NAD83 +no_defs +ellps=GRS80 +towgs84=0,0,0")
+
+heat_tract <- over(x=heat, y=bos_joined)
+
+heat@data <- data.frame(heat@data, heat_tract)
+
+heat_tracts <- heat@data
+```
+
+```{r}
+heat_tracts_calc <- heat_tracts %>%
+  group_by(GEOID) %>%
+  summarize(total = n(),
+            estimate = mean(estimate),
+            moe = mean(moe))
+
+ggplot(heat_tracts_calc, aes(y = total, x = estimate)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+
+
+tract_lm <- lm(total~estimate, data = heat_tracts_calc)
+broom_tract_lm <- tidy(tract_lm)
+
+augmented_tracts <- augment(tract_lm)
+
+highchart() %>%
+  hc_add_series(heat_tracts_calc, "point", hcaes(x = estimate, y = total)) %>%
+  hc_add_series(augmented_tracts, "line", hcaes(x = estimate, y = .fitted))
+
+```
+
